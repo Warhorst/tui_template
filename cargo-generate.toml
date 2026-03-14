@@ -1,0 +1,7 @@
+[template]
+ignore = [
+  ".git",
+  ".gitignore",
+  "target",
+  "Cargo.lock"
+]
