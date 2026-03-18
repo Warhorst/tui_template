@@ -1,19 +1,39 @@
-use crossterm::event::{Event, KeyCode, KeyEvent, read};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::{
-    DefaultTerminal,
+    Frame,
     layout::{Constraint, Layout},
-    prelude::{Buffer, Rect},
+    prelude::Rect,
     style::{Color, Style},
     symbols::border,
     text::Line,
-    widgets::{Block, Cell, Row, StatefulWidget, Table, TableState, Widget},
+    widgets::{Block, Cell, Row, Table, TableState},
 };
-use ratatui_tools::Messages;
+use ratatui_tools::Component;
 
 const HIGHLIGHT_STYLE: Style = Style::new().fg(Color::Green);
 
 pub fn main() -> std::io::Result<()> {
-    ratatui::run(|t| App::default().run(t))
+    ratatui::run(|terminal| {
+        let mut state = State::default();
+        let mut app = App::default();
+        let mut focus = Focus::MainPanel;
+
+        while !state.should_exit {
+            terminal.draw(|frame| {
+                app.render(frame, frame.area(), &state, &focus);
+            })?;
+
+            let message_opt = app.handle_event(event::read()?, &state, &mut focus);
+
+            if let Some(message) = message_opt {
+                match message {
+                    Message::Close => state.should_exit = true,
+                }
+            }
+        }
+
+        Ok(())
+    })
 }
 
 /// The whole state of the app itself
@@ -29,67 +49,28 @@ enum Message {
     Close,
 }
 
-/// The TUI app
+/// The current focused component of the app.
+enum Focus {
+    MainPanel,
+    SettingsPanel,
+}
+
+/// The TUI app main component
 #[derive(Default)]
 struct App {
-    /// The current app state
-    state: State,
     /// sub panel A
     main_panel: MainPanel,
     /// sub panel B
     setting_panel: SettingPanel,
 }
 
-impl App {
-    /// Main loop which renders the app and handles events
-    fn run(
-        &mut self,
-        terminal: &mut DefaultTerminal,
-    ) -> std::io::Result<()> {
-        while !self.state.should_exit {
-            terminal.draw(|frame| frame.render_widget(&mut *self, frame.area()))?;
-
-            if let Event::Key(key) = read()?
-                && key.is_press()
-            {
-                for message in self.handle_events(key) {
-                    match message {
-                        Message::Close => self.state.should_exit = true,
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn handle_events(
-        &mut self,
-        event: KeyEvent,
-    ) -> Messages<Message> {
-        match event.code {
-            KeyCode::Esc => Messages::single(Message::Close),
-            KeyCode::Char('1') => {
-                self.main_panel.selected = true;
-                self.setting_panel.selected = false;
-                Messages::none()
-            }
-            KeyCode::Char('2') => {
-                self.setting_panel.selected = true;
-                self.main_panel.selected = false;
-                Messages::none()
-            }
-            // Handle messages from the sub widgets here
-            _ => Messages::from_messages([self.setting_panel.handle_events(event)]),
-        }
-    }
-}
-
-impl Widget for &mut App {
+impl Component<State, Focus, Message> for App {
     fn render(
-        self,
+        &mut self,
+        frame: &mut Frame,
         area: Rect,
-        buf: &mut Buffer,
+        _state: &State,
+        focus: &Focus,
     ) {
         let block = Block::bordered()
             .title_top(Line::from(" {{ crate_name }} ").centered())
@@ -100,29 +81,52 @@ impl Widget for &mut App {
             Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)])
                 .areas(inner_area);
 
-        block.render(area, buf);
+        frame.render_widget(block, area);
 
-        self.main_panel.render(panel_a_area, buf, &mut self.state);
-        self.setting_panel
-            .render(panel_b_area, buf, &mut self.state);
+        self.main_panel.render(frame, panel_a_area, &(), focus);
+        self.setting_panel.render(frame, panel_b_area, &(), focus);
+    }
+
+    fn handle_event(
+        &mut self,
+        event: Event,
+        _state: &State,
+        focus: &mut Focus,
+    ) -> Option<Message> {
+        if let Event::Key(key_event) = event
+            && key_event.kind == KeyEventKind::Press
+        {
+            match key_event.code {
+                KeyCode::Esc => return Some(Message::Close),
+                KeyCode::Char('1') => {
+                    *focus = Focus::MainPanel;
+                    return None;
+                }
+                KeyCode::Char('2') => {
+                    *focus = Focus::SettingsPanel;
+                    return None;
+                }
+                // Handle messages from the sub widgets here
+                _ => return self.setting_panel.handle_event(event, &(), focus),
+            }
+        }
+
+        None
     }
 }
 
 #[derive(Default)]
-struct MainPanel {
-    selected: bool,
-}
+struct MainPanel;
 
-impl StatefulWidget for &mut MainPanel {
-    type State = State;
-
+impl Component<(), Focus, ()> for MainPanel {
     fn render(
-        self,
+        &mut self,
+        frame: &mut Frame,
         area: Rect,
-        buf: &mut Buffer,
-        _state: &mut Self::State,
+        _state: &(),
+        focus: &Focus,
     ) {
-        let style = if self.selected {
+        let style = if matches!(focus, Focus::MainPanel) {
             HIGHLIGHT_STYLE
         } else {
             Style::new()
@@ -132,19 +136,17 @@ impl StatefulWidget for &mut MainPanel {
             .title(Line::from(" Main Panel ").centered())
             .border_style(style);
 
-        block.render(area, buf);
+        frame.render_widget(block, area);
     }
 }
 
 struct SettingPanel {
-    selected: bool,
     table_state: TableState,
 }
 
 impl Default for SettingPanel {
     fn default() -> Self {
         SettingPanel {
-            selected: false,
             table_state: TableState::new().with_selected(Some(0)),
         }
     }
@@ -152,48 +154,17 @@ impl Default for SettingPanel {
 
 impl SettingPanel {
     const NUM_ROWS: usize = 3;
-
-    fn handle_events(
-        &mut self,
-        event: KeyEvent,
-    ) -> Messages<Message> {
-        if !self.selected {
-            return Messages::none();
-        }
-
-        match event.code {
-            // Widget state is updated here directly. App state can be manipulated by sending messages.
-            KeyCode::Char('j') => {
-                if let Some(index) = self.table_state.selected()
-                    && index < Self::NUM_ROWS - 1
-                {
-                    self.table_state.select(Some(index + 1))
-                }
-                Messages::none()
-            }
-            KeyCode::Char('k') => {
-                if let Some(index) = self.table_state.selected()
-                    && index > 0
-                {
-                    self.table_state.select(Some(index - 1))
-                }
-                Messages::none()
-            }
-            _ => Messages::none(),
-        }
-    }
 }
 
-impl StatefulWidget for &mut SettingPanel {
-    type State = State;
-
+impl Component<(), Focus, Message> for SettingPanel {
     fn render(
-        self,
+        &mut self,
+        frame: &mut Frame,
         area: Rect,
-        buf: &mut Buffer,
-        _state: &mut Self::State,
+        _state: &(),
+        focus: &Focus,
     ) {
-        let style = if self.selected {
+        let style = if matches!(focus, Focus::SettingsPanel) {
             HIGHLIGHT_STYLE
         } else {
             Style::new()
@@ -204,7 +175,7 @@ impl StatefulWidget for &mut SettingPanel {
             .border_style(style);
 
         let inner_area = block.inner(area);
-        block.render(area, buf);
+        frame.render_widget(block, area);
 
         let rows = [
             Row::new([Cell::new("Setting A")]),
@@ -215,6 +186,42 @@ impl StatefulWidget for &mut SettingPanel {
         let widths = [Constraint::Percentage(100)];
 
         let table = Table::new(rows, widths).row_highlight_style(style);
-        StatefulWidget::render(table, inner_area, buf, &mut self.table_state);
+        frame.render_stateful_widget(table, inner_area, &mut self.table_state);
+    }
+
+    fn handle_event(
+        &mut self,
+        event: Event,
+        _state: &(),
+        focus: &mut Focus,
+    ) -> Option<Message> {
+        if !matches!(focus, Focus::SettingsPanel) {
+            return None;
+        }
+
+        if let Event::Key(key_event) = event
+            && key_event.kind == KeyEventKind::Press
+        {
+            match key_event.code {
+                // Widget state is updated here directly. App state can be manipulated by sending messages.
+                KeyCode::Char('j') => {
+                    if let Some(index) = self.table_state.selected()
+                        && index < Self::NUM_ROWS - 1
+                    {
+                        self.table_state.select(Some(index + 1))
+                    }
+                }
+                KeyCode::Char('k') => {
+                    if let Some(index) = self.table_state.selected()
+                        && index > 0
+                    {
+                        self.table_state.select(Some(index - 1))
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        None
     }
 }
